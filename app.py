@@ -1,74 +1,84 @@
 import streamlit as st
 import cv2
 import numpy as np
-from pyzbar.pyzbar import decode, ZBarSymbol
+import pytesseract
+from PIL import Image
+import os
 import sqlite3
 from datetime import datetime
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Scanner Profesional de Cédulas", layout="centered")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Registro OCR Frontal", layout="wide")
+
+# Crear carpeta para fotos si no existe
+if not os.path.exists('fotos_cedulas'):
+    os.makedirs('fotos_cedulas')
 
 def conectar_db():
-    conn = sqlite3.connect('base_conductores.db')
+    conn = sqlite3.connect('control_acceso.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS registros 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cedula TEXT, nombre TEXT, fecha TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  cedula TEXT, nombre TEXT, fecha TEXT, ruta_foto TEXT)''')
     conn.commit()
     return conn
 
-# --- MOTOR DE PROCESAMIENTO AVANZADO ---
-def mejorar_y_leer(imagen_bytes):
-    # Convertir bytes a imagen OpenCV
-    nparr = np.frombuffer(imagen_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+# --- FUNCIÓN OCR ---
+def extraer_datos(imagen_cv):
+    # Convertir a gris y mejorar contraste para OCR
+    gray = cv2.cvtColor(imagen_cv, cv2.COLOR_BGR2GRAY)
+    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
     
-    # 1. Convertir a escala de grises
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Binarización de Otsu (encuentra el umbral óptimo de blanco/negro automáticamente)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # 3. Intento de lectura en 3 variantes
-    # Original, Grises, y Blanco/Negro puro
-    for version in [img, gray, thresh]:
-        lectura = decode(version, symbols=[ZBarSymbol.PDF417])
-        if lectura:
-            return lectura[0].data.decode('ISO-8859-1', errors='ignore'), version
-            
-    return None, thresh
+    # Extraer todo el texto de la imagen
+    texto = pytesseract.image_to_string(gray, lang='spa')
+    return texto
 
 # --- INTERFAZ ---
-st.title("📸 Scanner de Cédula (Modo Foto)")
-st.info("Tome la foto asegurándose de que el código PDF417 ocupe la mayor parte de la pantalla.")
+st.title("🪪 Registro por Cédula Frontal (OCR)")
 
-# Widget de cámara
-foto_capturada = st.camera_input("Enfoque el respaldo de la cédula")
+col_cam, col_reg = st.columns([1, 1])
 
-if foto_capturada:
-    with st.spinner("Procesando imagen con alta precisión..."):
-        texto_detectado, imagen_procesada = mejorar_y_leer(foto_capturada.getvalue())
+with col_cam:
+    st.subheader("Paso 1: Tomar Foto Frontal")
+    foto = st.camera_input("Enfoque la parte delantera de la cédula")
+
+if foto:
+    # Procesar imagen
+    file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    
+    with st.spinner("Analizando documento..."):
+        texto_extraido = extraer_datos(img)
+    
+    with col_reg:
+        st.subheader("Paso 2: Confirmar Datos")
         
-    if texto_detectado:
-        st.success("✅ ¡Lectura exitosa!")
-        # Mostramos la cadena para que veas qué extrajo
-        st.code(texto_detectado)
-        
-        # Formulario de confirmación
-        with st.form("confirmar_datos"):
-            col1, col2 = st.columns(2)
-            c_id = col1.text_input("Número de Cédula")
-            c_nom = col2.text_input("Nombres y Apellidos")
+        # Intentamos buscar el número de cédula en el texto con lógica simple
+        # (Buscamos secuencias de números largas)
+        import re
+        numeros = re.findall(r'\d+', texto_extraido)
+        cedula_sugerida = max(numeros, key=len) if numeros else ""
+
+        with st.form("datos_ocr"):
+            num_cedula = st.text_input("Número de Cédula:", value=cedula_sugerida)
+            nombre_completo = st.text_input("Nombre Completo (como aparece en la foto):")
             
-            if st.form_submit_button("Guardar en Historial"):
+            if st.form_submit_button("Guardar Registro"):
+                # Guardar imagen físicamente
+                nombre_archivo = f"fotos_cedulas/{num_cedula}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                cv2.imwrite(nombre_archivo, img)
+                
+                # Guardar en DB
                 db = conectar_db()
-                db.execute("INSERT INTO registros (cedula, nombre, fecha) VALUES (?,?,?)", 
-                          (c_id, c_nom, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                db.execute("INSERT INTO registros (cedula, nombre, fecha, ruta_foto) VALUES (?,?,?,?)",
+                          (num_cedula, nombre_completo, datetime.now().strftime("%Y-%m-%d %H:%M"), nombre_archivo))
                 db.commit()
-                st.balloons()
-    else:
-        st.error("No se pudo decodificar el código de la foto.")
-        st.subheader("Imagen analizada (para diagnóstico):")
-        # Mostramos cómo vio el código el algoritmo para ver si estaba borroso
-        st.image(imagen_procesada, caption="Esta es la versión blanco/negro que el sistema intentó leer.")
-        st.info("Tip: Si la imagen se ve muy blanca o muy negra, cambie el ángulo de luz para evitar reflejos.")
+                st.success("✅ Registro guardado exitosamente.")
+
+# --- HISTORIAL ---
+st.markdown("---")
+st.subheader("📋 Registros Recientes")
+db = conectar_db()
+df = pd.read_sql_query("SELECT * FROM registros ORDER BY id DESC", db)
+st.dataframe(df, use_container_width=True)
 
