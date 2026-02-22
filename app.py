@@ -5,122 +5,112 @@ import pytesseract
 import os
 import sqlite3
 import pandas as pd
+import re
 from datetime import datetime
+from PIL import Image
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Registro Frontal de Cédula", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Scanner Frontal Pro", layout="wide")
 
-# Carpeta de almacenamiento
-FOLDER_FOTOS = "evidencias_cedula"
+# Carpeta para guardar las evidencias
+FOLDER_FOTOS = "registros_cedulas"
 if not os.path.exists(FOLDER_FOTOS):
     os.makedirs(FOLDER_FOTOS)
 
+# --- BASE DE DATOS ---
 def conectar_db():
-    conn = sqlite3.connect('base_datos_empresa.db')
+    conn = sqlite3.connect('logistica_conductores.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS registros 
+    c.execute('''CREATE TABLE IF NOT EXISTS ingresos 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   cedula TEXT, nombre TEXT, fecha_hora TEXT, ruta_foto TEXT)''')
     conn.commit()
     return conn
 
-# --- MOTOR OCR OPTIMIZADO ---
-def procesar_ocr_frontal(imagen_color):
-    # Convertimos a gris para el análisis
-    gray = cv2.cvtColor(imagen_color, cv2.COLOR_BGR2GRAY)
-    # Aplicamos un filtro para eliminar ruido y resaltar letras
-    gray = cv2.medianBlur(gray, 3)
-    # Binarización para que el OCR lea mejor (Solo para análisis interno)
-    umbral = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    
-    # Extraer texto (español)
-    texto = pytesseract.image_to_string(umbral, lang='spa')
-    return texto, umbral
-
-# --- INTERFAZ ---
-st.title("🪪 Registro de Personal")
-st.markdown("### Por favor, ubique la parte frontal de la cédula frente a la cámara.")
-
-col_izq, col_der = st.columns([1, 1])
-
-with col_izq:
-    st.subheader("📸 Captura de Documento")
-    foto = st.camera_input("Enfoque la cédula", label_visibility="collapsed")
-
-if foto:
-    # Convertir foto recibida
-    file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
-    img_color = cv2.imdecode(file_bytes, 1)
-    
-    # Procesar texto
-    with st.spinner("Analizando información..."):
-        texto_crudo, img_analisis = procesar_ocr_frontal(img_color)
-    
-    with col_der:
-        st.subheader("📝 Datos Detectados")
-        
-        # Lógica de limpieza rápida (buscar números largos para la cédula)
-        import re
-        numeros = re.findall(r'\d+', texto_crudo)
-        # Filtramos números que tengan entre 7 y 10 dígitos (típico de cédula)
-        cedula_posible = next((n for n in numeros if 7 <= len(n) <= 10), "")
-
-        with st.form("confirmacion_datos"):
-            st.info("Verifique y corrija si es necesario:")
-            cedula_final = st.text_input("Número de Documento:", value=cedula_posible)
-            nombre_final = st.text_input("Nombre Completo (como aparece en el documento):")
-            
-            if st.form_submit_button("📥 GUARDAR REGISTRO"):
-                if cedula_final and nombre_final:
-                    # Guardar la foto A COLOR como evidencia
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    ruta_archivo = f"{FOLDER_FOTOS}/CED_{cedula_final}_{timestamp}.jpg"
-                    cv2.imwrite(ruta_archivo, img_color)
-                    
-                    # Guardar en Base de Datos
-                    db = conectar_db()
-                    cursor = db.cursor()
-                    cursor.execute("INSERT INTO registros (cedula, nombre, fecha_hora, ruta_foto) VALUES (?,?,?,?)",
-                                   (cedula_final, nombre_final, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ruta_archivo))
-                    db.commit()
-                    
-                    st.success(f"Registro de {nombre_final} guardado con éxito.")
-                    st.balloons()
-                else:
-                    st.error("Por favor, complete ambos campos antes de guardar.")
-
-# --- SECCIÓN DE HISTORIAL ---
-st.markdown("---")
-st.subheader("📊 Historial de Registros")
-db = conectar_db()
-df = pd.read_sql_query("SELECT cedula, nombre, fecha_hora FROM registros ORDER BY id DESC", db)
-st.table(df)
-db.close()
-
-def digitalizar_cedula(imagen_cv):
-    # 1. Escalar la imagen (hacerla más grande para que las letras sean claras)
+# --- MOTOR DE DIGITALIZACIÓN ACTIVA ---
+def digitalizar_imagen(imagen_cv):
+    # 1. Aumentar tamaño para mejorar resolución de letras pequeñas
     img_grande = cv2.resize(imagen_cv, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     
-    # 2. Convertir a escala de grises
+    # 2. Pasar a escala de grises
     gray = cv2.cvtColor(img_grande, cv2.COLOR_BGR2GRAY)
     
-    # 3. Aplicar "Adaptive Thresholding" 
-    # Esto ayuda a que el texto resalte incluso si hay sombras en la cédula
+    # 3. Filtro Bilateral: quita ruido pero mantiene los bordes de las letras nítidos
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+    
+    # 4. Umbralización Adaptativa: detecta texto incluso con sombras o mala luz
     digitalizada = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
         cv2.THRESH_BINARY, 11, 2
     )
     
-    # 4. Limpieza de ruido (Morfología)
-    kernel = np.ones((1, 1), np.uint8)
-    digitalizada = cv2.dilate(digitalizada, kernel, iterations=1)
-    digitalizada = cv2.erode(digitalizada, kernel, iterations=1)
-    
-    # Intentar OCR con configuración específica para documentos de identidad
-    # --psm 6 asume un bloque de texto uniforme
-    config = r'--oem 3 --psm 6'
-    texto = pytesseract.image_to_string(digitalizada, lang='spa', config=config)
+    # Intentar OCR con configuración optimizada para documentos
+    # psm 6: Asume un bloque único de texto
+    config_ocr = r'--oem 3 --psm 6'
+    texto = pytesseract.image_to_string(digitalizada, lang='spa', config=config_ocr)
     
     return texto, digitalizada
+
+# --- INTERFAZ DE USUARIO ---
+st.title("🛡️ Sistema de Registro Digital")
+st.markdown("#### Ubique la **PARTE FRONTAL** de la cédula frente a la cámara")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("📸 Captura de Imagen")
+    foto = st.camera_input("Scanner", label_visibility="collapsed")
+
+if foto:
+    # Convertir bytes a formato OpenCV
+    file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
+    img_original = cv2.imdecode(file_bytes, 1)
+    
+    with st.spinner("Digitalizando y extrayendo información..."):
+        texto_ocr, img_procesada = digitalizar_imagen(img_original)
+    
+    with col2:
+        st.subheader("📝 Datos del Registro")
+        
+        # Lógica para encontrar el número de cédula (7 a 10 dígitos)
+        numeros = re.findall(r'\d+', texto_ocr)
+        cedula_sugerida = next((n for n in numeros if 7 <= len(n) <= 10), "")
+        
+        # Mostrar lo que el sistema "vio" para ayudar al usuario
+        st.image(img_procesada, caption="Vista Digitalizada (Lo que el OCR analizó)", use_column_width=True)
+        
+        with st.form("formulario_registro"):
+            val_cedula = st.text_input("Número de Cédula:", value=cedula_sugerida)
+            val_nombre = st.text_input("Nombre Completo (como aparece):")
+            
+            confirmar = st.form_submit_button("📥 GUARDAR EN BASE DE DATOS")
+            
+            if confirmar:
+                if val_cedula and val_nombre:
+                    # Guardar foto a color como evidencia
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ruta_img = f"{FOLDER_FOTOS}/ID_{val_cedula}_{timestamp}.jpg"
+                    cv2.imwrite(ruta_img, img_original)
+                    
+                    # Guardar en DB
+                    db = conectar_db()
+                    cursor = db.cursor()
+                    cursor.execute("INSERT INTO ingresos (cedula, nombre, fecha_hora, ruta_foto) VALUES (?,?,?,?)",
+                                   (val_cedula, val_nombre, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ruta_archivo))
+                    db.commit()
+                    
+                    st.success(f"¡Registro exitoso! Conductor: {val_nombre}")
+                    st.balloons()
+                else:
+                    st.error("⚠️ Debe completar Cédula y Nombre antes de guardar.")
+
+# --- HISTORIAL ---
+st.markdown("---")
+st.subheader("📋 Historial de Registros")
+db = conectar_db()
+df = pd.read_sql_query("SELECT id, cedula, nombre, fecha_hora FROM ingresos ORDER BY id DESC", db)
+st.dataframe(df, use_container_width=True)
+db.close()
+
 
 
