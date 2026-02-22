@@ -97,5 +97,30 @@ df = pd.read_sql_query("SELECT cedula, nombre, fecha_hora FROM registros ORDER B
 st.table(df)
 db.close()
 
+def digitalizar_cedula(imagen_cv):
+    # 1. Escalar la imagen (hacerla más grande para que las letras sean claras)
+    img_grande = cv2.resize(imagen_cv, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    
+    # 2. Convertir a escala de grises
+    gray = cv2.cvtColor(img_grande, cv2.COLOR_BGR2GRAY)
+    
+    # 3. Aplicar "Adaptive Thresholding" 
+    # Esto ayuda a que el texto resalte incluso si hay sombras en la cédula
+    digitalizada = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    # 4. Limpieza de ruido (Morfología)
+    kernel = np.ones((1, 1), np.uint8)
+    digitalizada = cv2.dilate(digitalizada, kernel, iterations=1)
+    digitalizada = cv2.erode(digitalizada, kernel, iterations=1)
+    
+    # Intentar OCR con configuración específica para documentos de identidad
+    # --psm 6 asume un bloque de texto uniforme
+    config = r'--oem 3 --psm 6'
+    texto = pytesseract.image_to_string(digitalizada, lang='spa', config=config)
+    
+    return texto, digitalizada
 
 
