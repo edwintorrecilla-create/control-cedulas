@@ -6,102 +6,103 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 
-# --- 1. CONFIGURACIÓN DE BASE DE DATOS ---
-# Esto garantiza que el archivo sea único y se actualice
-def inicializar_db():
-    conn = sqlite3.connect('base_datos_conductores.db')
+# --- CONFIGURACIÓN ESTÉTICA (CSS) ---
+st.set_page_config(page_title="Control de Ingresos", layout="wide")
+
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007bff; color: white; }
+    .stDataFrame { background-color: white; border-radius: 10px; }
+    div[data-testid="stMetricValue"] { font-size: 24px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- BASE DE DATOS ---
+def conectar_db():
+    conn = sqlite3.connect('despachos.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS ingresos 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  cedula TEXT, 
-                  nombre_completo TEXT, 
-                  rh TEXT, 
-                  fecha_hora TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS conductores 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, cedula TEXT, nombre TEXT, rh TEXT, fecha TEXT)''')
     conn.commit()
     return conn
 
-# --- 2. LÓGICA DE PROCESAMIENTO DE TEXTO ---
-def procesar_texto_cedula(texto_crudo):
-    """
-    Aquí extraeremos los datos. La cadena de la cédula colombiana 
-    suele ser compleja, por ahora haremos una limpieza básica.
-    """
-    # Intentamos una limpieza simple de caracteres no deseados
-    limpio = "".join(char for char in texto_crudo if char.isprintable())
+# --- MEJORA DE LECTURA POR DIMENSIONES (7.5x1.5 cm) ---
+def procesar_zoom_cedula(img):
+    h, w, _ = img.shape
+    # Recortamos una franja central (donde usualmente el usuario pone la cédula)
+    # Esto simula un "Macro" digital para captar mejor el PDF417
+    start_row, end_row = int(h*0.3), int(h*0.7)
+    start_col, end_col = int(w*0.1), int(w*0.9)
+    recorte = img[start_row:end_row, start_col:end_col]
     
-    # Nota: El parseo exacto depende de si la cédula es nueva o vieja.
-    # Por ahora, guardamos el bloque de texto para que tú veas cómo llega.
-    return {
-        "cedula": "Pendiente Procesar", 
-        "datos": limpio[:50] + "..." # Muestra una parte
-    }
+    # Aumentamos el tamaño del recorte para mejorar resolución
+    recorte_grande = cv2.resize(recorte, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(recorte_grande, cv2.COLOR_BGR2GRAY)
+    # Filtro para resaltar barras negras
+    sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    sharp = cv2.filter2D(gray, -1, sharpen_kernel)
+    return sharp
 
-# --- 3. INTERFAZ DE USUARIO ---
-st.set_page_config(page_title="Control de Carga - Empresa", layout="wide")
+# --- INTERFAZ ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/4006/4006511.png", width=100)
+    st.title("Menú")
+    opcion = st.radio("Navegación", ["🆕 Nuevo Registro", "📊 Ver Historial"])
+    st.info("© 2024 Tu Empresa. Todos los derechos reservados.")
 
-st.title("🚛 Sistema de Registro de Conductores")
-st.sidebar.header("Opciones")
-modo = st.sidebar.radio("Ir a:", ["Registrar Ingreso", "Consultar Histórico"])
-
-if modo == "Registrar Ingreso":
-    st.header("📸 Escaneo de Documento")
+if opcion == "🆕 Nuevo Registro":
+    st.markdown("## 42 Registro de Conductores 😊")
+    st.write("Aproxime el código de la cédula al recuadro de la cámara.")
     
-    # Captura de foto
-    foto = st.camera_input("Enfoque el código PDF417 de la cédula")
+    col_cam, col_datos = st.columns([1, 1])
 
-    if foto:
-        # Convertir imagen para que OpenCV la entienda
-        file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
-        img = cv2.imdecode(file_bytes, 1)
+    with col_cam:
+        st.subheader("Cámara")
+        foto = st.camera_input("Scanner", label_visibility="collapsed")
         
-        # Intentar leer el código
-        objetos = decode(img, symbols=[ZBarSymbol.PDF417])
+    with col_datos:
+        st.subheader("Datos Extraídos")
+        if foto:
+            file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, 1)
+            
+            # Procesamiento con Zoom y Enfoque
+            img_ready = procesar_zoom_cedula(img)
+            lectura = decode(img_ready, symbols=[ZBarSymbol.PDF417])
 
-        if objetos:
-            texto_detectado = objetos[0].data.decode('ISO-8859-1', errors='ignore')
-            st.success("✅ Código detectado")
-            
-            # Mostramos el contenido para que verifiques qué llega
-            st.info(f"Contenido leído: {texto_detectado}")
-            
-            # Formulario para confirmar datos
-            with st.form("confirmar_registro"):
-                st.write("### Confirmación de Datos")
-                # Por ahora pedimos confirmar manualmente mientras pulimos el extractor automático
-                cedula = st.text_input("Número de Cédula")
-                nombre = st.text_input("Nombre Completo")
+            if lectura:
+                st.success("✅ Cédula leída con éxito")
+                texto_crudo = lectura[0].data.decode('ISO-8859-1', errors='ignore')
                 
-                enviado = st.form_submit_button("Guardar en Base de Datos")
+                # Campos automáticos (Simulados hasta que me pases el texto real)
+                cedula_val = "10203040" 
+                nombre_val = "JUAN PEREZ"
                 
-                if enviado:
-                    conn = inicializar_db()
-                    cursor = conn.cursor()
-                    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("INSERT INTO ingresos (cedula, nombre_completo, fecha_hora) VALUES (?, ?, ?)",
-                                   (cedula, nombre, ahora))
+                cedula = st.text_input("Cédula:", value=cedula_val)
+                nombre = st.text_input("Nombre:", value=nombre_val)
+                rh = st.text_input("RH:", value="O+")
+                
+                if st.button("📥 Confirmar y Guardar"):
+                    conn = conectar_db()
+                    c = conn.cursor()
+                    c.execute("INSERT INTO conductores (cedula, nombre, rh, fecha) VALUES (?,?,?,?)",
+                             (cedula, nombre, rh, datetime.now().strftime("%Y-%m-%d %H:%M")))
                     conn.commit()
-                    conn.close()
-                    st.success("¡Registro guardado con éxito!")
-        else:
-            st.warning("⚠️ No se pudo leer el código. Intenta con más luz o acercando más el documento.")
+                    st.balloons()
+                    st.success("¡Registro guardado!")
+            else:
+                st.warning("⚠️ No se detectó el código. Asegúrese de centrar la franja de barras.")
+                st.info("Tip: Mantenga la cédula a 15 cm de la cámara.")
 
-elif modo == "Consultar Histórico":
-    st.header("📋 Registros Almacenados")
+else:
+    st.markdown("## 44 Historial de Ingresos 😍")
+    conn = conectar_db()
+    df = pd.read_sql_query("SELECT * FROM conductores ORDER BY id DESC", conn)
     
-    conn = inicializar_db()
-    df = pd.read_sql_query("SELECT * FROM ingresos ORDER BY id DESC", conn)
-    conn.close()
-
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        
-        # Botón para descargar como Excel/CSV
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Descargar Reporte (CSV)",
-            data=csv,
-            file_name=f'reporte_conductores_{datetime.now().date()}.csv',
-            mime='text/csv',
-        )
-    else:
-        st.write("No hay registros en la base de datos.")
+    st.dataframe(df, use_container_width=True)
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("⬇️ Descargar Reporte CSV", df.to_csv(index=False), "reporte.csv", "text/csv")
+    
